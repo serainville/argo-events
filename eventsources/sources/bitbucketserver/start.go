@@ -17,11 +17,16 @@ package bitbucketserver
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io/ioutil"
 	"math/rand"
 	"net/http"
 	"reflect"
+	"strings"
 	"time"
 
 	bitbucketv1 "github.com/gfleury/go-bitbucket-v1"
@@ -84,6 +89,12 @@ func (router *Router) HandleRoute(writer http.ResponseWriter, request *http.Requ
 		logger.Errorw("failed to parse request body", zap.Error(err))
 		common.SendErrorResponse(writer, err.Error())
 		route.Metrics.EventProcessingFailed(route.EventSourceName, route.EventName)
+		return
+	}
+
+	signature := request.Header.Get("X-Hub-Signature")
+	if err := router.checkHMAC(body, signature); err != nil {
+		common.SendErrorResponse(writer, err.Error())
 		return
 	}
 
@@ -323,5 +334,31 @@ func (router *Router) CreateBitbucketWebhook(ctx context.Context, bitbucketConfi
 		logger.With("hook-id", existingHook.ID).Info("hook successfully updated")
 	}
 
+	return nil
+}
+
+func (router *Router) checkHMAC(body []byte, encodedHash string) error {
+	webhookSecret, err := common.GetSecretFromVolume(router.bitbucketserverEventSource.WebhookSecret)
+	if err != nil {
+		return errors.Errorf("failed to get bitbucketserver webhook secret. err: %+v", err)
+	}
+
+	if strings.HasPrefix(encodedHash, "sha256=") {
+		messageMAC, err := hex.DecodeString(strings.TrimPrefix(encodedHash, "sha256="))
+		if err != nil {
+			return errors.Errorf("failed to validate signature. err: %+v", err)
+		}
+
+		mac := hmac.New(sha256.New, []byte(webhookSecret))
+		mac.Write(body)
+		expectedMAC := mac.Sum(nil)
+
+		if ok := hmac.Equal(messageMAC, expectedMAC); !ok {
+			return fmt.Errorf("cannot validate signature. Invalid message digest or secret")
+		}
+
+	} else {
+		return fmt.Errorf("failed to validate webhook secet")
+	}
 	return nil
 }
