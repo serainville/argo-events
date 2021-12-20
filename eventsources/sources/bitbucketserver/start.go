@@ -34,6 +34,7 @@ import (
 
 	"github.com/argoproj/argo-events/common"
 	"github.com/argoproj/argo-events/common/logging"
+	eventsourcecommon "github.com/argoproj/argo-events/eventsources/common"
 	"github.com/argoproj/argo-events/eventsources/common/webhook"
 	"github.com/argoproj/argo-events/eventsources/sources"
 	"github.com/argoproj/argo-events/pkg/apis/events"
@@ -168,7 +169,7 @@ func (router *Router) PostInactivate() error {
 }
 
 // StartListening starts an event source
-func (el *EventListener) StartListening(ctx context.Context, dispatch func([]byte) error) error {
+func (el *EventListener) StartListening(ctx context.Context, dispatch func([]byte, ...eventsourcecommon.Options) error) error {
 	defer sources.Recover(el.GetEventName())
 
 	bitbucketserverEventSource := &el.BitbucketServerEventSource
