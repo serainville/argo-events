@@ -56,3 +56,7 @@ type Router struct {
 	// bitbucketserverEventSource is the event source that contains configuration necessary to consume events from Bitbucket Server
 	bitbucketserverEventSource *v1alpha1.BitbucketServerEventSource
 }
+
+type BitbucketDiagnosticPingMessage struct {
+	Test bool `json:"test"`
+}

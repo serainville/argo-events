@@ -22,6 +22,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"hash"
 	"io/ioutil"
 	"math/rand"
 	"net/http"
@@ -93,12 +94,6 @@ func (router *Router) HandleRoute(writer http.ResponseWriter, request *http.Requ
 		return
 	}
 
-	signature := request.Header.Get("X-Hub-Signature")
-	if err := router.checkHMAC(body, signature); err != nil {
-		common.SendErrorResponse(writer, err.Error())
-		return
-	}
-
 	event := &events.BitbucketServerEventData{
 		Headers:  request.Header,
 		Body:     (*json.RawMessage)(&body),
@@ -110,6 +105,11 @@ func (router *Router) HandleRoute(writer http.ResponseWriter, request *http.Requ
 		logger.Info("failed to marshal event")
 		common.SendErrorResponse(writer, "invalid event")
 		route.Metrics.EventProcessingFailed(route.EventSourceName, route.EventName)
+		return
+	}
+
+	if err := router.validateSignature(event.Headers, *event.Body); err != nil {
+		common.SendErrorResponse(writer, err.Error())
 		return
 	}
 
@@ -338,28 +338,55 @@ func (router *Router) CreateBitbucketWebhook(ctx context.Context, bitbucketConfi
 	return nil
 }
 
-func (router *Router) checkHMAC(body []byte, encodedHash string) error {
+func (router *Router) validateSignature(header http.Header, body json.RawMessage) error {
+	var messageMAC []byte
+	var hashFn func() hash.Hash
+
+	// HMAC signatures are not sent with Bitbucket webhook events, oddly.
+	if isDiagnosticPing(header) && hasBitbucketWebhookTestBody(body) {
+		return nil
+	}
+
 	webhookSecret, err := common.GetSecretFromVolume(router.bitbucketserverEventSource.WebhookSecret)
 	if err != nil {
 		return errors.Errorf("failed to get bitbucketserver webhook secret. err: %+v", err)
 	}
 
-	if strings.HasPrefix(encodedHash, "sha256=") {
-		messageMAC, err := hex.DecodeString(strings.TrimPrefix(encodedHash, "sha256="))
+	encodedHash := header.Get("X-Hub-Signature")
+
+	switch {
+	case strings.HasPrefix(encodedHash, "sha256="):
+		messageMAC, err = hex.DecodeString(strings.TrimPrefix(encodedHash, "sha256="))
 		if err != nil {
 			return errors.Errorf("failed to validate signature. err: %+v", err)
 		}
-
-		mac := hmac.New(sha256.New, []byte(webhookSecret))
-		mac.Write(body)
-		expectedMAC := mac.Sum(nil)
-
-		if ok := hmac.Equal(messageMAC, expectedMAC); !ok {
-			return fmt.Errorf("cannot validate signature. Invalid message digest or secret")
-		}
-
-	} else {
-		return fmt.Errorf("failed to validate webhook secet")
+		hashFn = sha256.New
+	default:
+		return fmt.Errorf("failed to validate HMAC signature. Encoding not supported")
 	}
+
+	if !checkHMAC(body, messageMAC, webhookSecret, hashFn) {
+		return errors.Errorf("failed to validate HMAC signature. Bad message or digest")
+	}
+
 	return nil
+}
+
+func checkHMAC(message, messageMAC []byte, secret string, hashFn func() hash.Hash) bool {
+	mac := hmac.New(hashFn, []byte(secret))
+	mac.Write(message)
+	expectedMAC := mac.Sum(nil)
+
+	return hmac.Equal(messageMAC, expectedMAC)
+}
+
+func isDiagnosticPing(header http.Header) bool {
+	return header.Get("X-Event-Key") == "diagnostic:ping"
+}
+
+func hasBitbucketWebhookTestBody(body json.RawMessage) bool {
+	var pingMessage BitbucketDiagnosticPingMessage
+	json.Unmarshal(body, &pingMessage)
+
+	return pingMessage.Test
 }
